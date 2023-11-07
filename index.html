@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OctoTwinsie</title>
+<script>
+let printers = JSON.parse(localStorage.getItem('printers')) || [];
+
+function savePrinters() {
+  const encodedData = btoa(unescape(encodeURIComponent(JSON.stringify(printers))));
+  const newUrl = `${window.location.protocol}//${window.location.host}${window.location.pathname}?data=${encodedData}`;
+  window.history.pushState({path: newUrl}, '', newUrl);
+  localStorage.setItem('printers', JSON.stringify(printers));
+  updatePrintersList();
+}
+
+function loadPrintersFromUrl() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const data = urlParams.get('data');
+  if (data) {
+    try {
+      printers = JSON.parse(decodeURIComponent(escape(atob(data))));
+      savePrinters(); // This will save it to localStorage and update the list
+    } catch (e) {
+      console.error('Error parsing printers from URL');
+    }
+  }
+}
+
+// Call this function on page load to initialize printers from the URL or localStorage
+function initializePrinters() {
+  loadPrintersFromUrl();
+  if (!printers.length) { // If no printers were loaded from the URL, try loading from localStorage
+    printers = JSON.parse(localStorage.getItem('printers')) || [];
+  }
+  updatePrintersList();
+}
+
+
+function addPrinter() {
+  const name = document.getElementById('name').value;
+  const url = document.getElementById('url').value;
+  const apiKey = document.getElementById('apiKey').value;
+
+  printers.push({ name, url, apiKey, latency: 'Unknown' });
+  savePrinters();
+}
+
+function updatePrintersList() {
+  const printersList = document.getElementById('printersList');
+  printersList.innerHTML = '';
+  printers.forEach((printer, index) => {
+    printersList.innerHTML += `<li>
+      <div>
+        <b>${printer.name} - ${printer.url}</b>
+        <button onclick="removePrinter(${index})">Remove</button>
+      </div>
+      <div>
+        <img src="${printer.url}/cam_${printer.name.toLowerCase()}/?action=stream">
+        </div>
+      <div>
+        Latency (ms): <input type="text" id="latency-input-${index}" value="${printer.latency}">
+        <button onclick="setLatency(${index})">Set Latency</button>
+        <button onclick="testLatency(${index})">Test Latency</button>
+        <span id="latency-${index}">${printer.latency} ms</span>
+      </div>
+      <span id="websocket-response-${index}"></span>
+    </li>`;
+  });
+
+  // // Set up WebSocket connections for each printer
+  // printers.forEach((printer, index) => {
+  //   setupPrinterWebSocket(printer, index);
+  // });
+}
+
+function removePrinter(index) {
+  printers.splice(index, 1);
+  savePrinters();
+}
+
+function homeAxes() {
+  const commandData = { command: "home", axes: ["x", "y", "z"] };
+  sendCommandToAll('/api/printer/printhead', commandData);
+}
+
+function sendGcode() {
+  const gcode = document.getElementById('gcode').value;
+  const commandData = { commands: [gcode] };
+  sendCommandToAll('/api/printer/command', commandData);
+}
+
+function startJob() {
+  const commandData = { command: "start" };
+  sendCommandToAll('/api/job', commandData);
+}
+
+function cancelJob() {
+  const commandData = { command: "cancel" };
+  sendCommandToAll('/api/job', commandData);
+}
+
+function pauseJob(action) { // action can be "pause" or "resume"
+  const commandData = { command: "pause", action: action };
+  sendCommandToAll('/api/job', commandData);
+}
+
+
+function sendCommandToAll(endpoint, commandData) {
+  // Find the maximum latency
+  const maxLatency = Math.max(...printers.map(printer => printer.latency));
+
+  printers.forEach((printer) => {
+    // Calculate delay for this printer
+    const delay = maxLatency - printer.latency;
+
+    // Use setTimeout to delay the fetch call
+    setTimeout(() => {
+      fetch(printer.url + endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // 'X-Api-Key': printer.apiKey,
+          'Authorization': 'Bearer '+printer.apiKey
+        },
+        body: JSON.stringify(commandData)
+      })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`Request to ${printer.name} failed with status: ${response.status}`);
+        }
+        return response.json();
+      })
+      .then(data => console.log(`${printer.name} response: `, data))
+      .catch(error => console.error(`Error in sending command to ${printer.name}: `, error));
+    }, delay);
+  });
+}
+
+async function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function testLatency(index, sampleSize = 10, cooldown = 1000) {
+  const printer = printers[index];
+  let totalLatency = 0;
+  let validSamples = 0;
+
+  document.getElementById(`latency-${index}`).textContent = 'Testing...';
+
+  for (let i = 0; i < sampleSize; i++) {
+    const start = new Date().getTime();
+
+    try {
+      const response = await fetch(printer.url + '/api/connection', {
+        method: 'GET',
+        headers: {
+          'Authorization': 'Bearer ' + printer.apiKey,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+
+      await response.json(); // This assumes the API returns JSON and you need to wait for it.
+      const latency = new Date().getTime() - start;
+
+      document.getElementById(`latency-${index}`).textContent = `Testing... ${latency}ms (${i + 1}/${sampleSize})`;
+
+      totalLatency += latency;
+      validSamples++;
+    } catch (error) {
+      console.error(`Error testing latency for ${printer.name} on sample ${i + 1}:`, error);
+      document.getElementById(`latency-${index}`).textContent = `Failed sample ${i + 1}`;
+    }
+
+    if (i < sampleSize - 1) {
+      await delay(cooldown); // Cooldown period before the next sample
+    }
+  }
+
+  if (validSamples > 0) {
+    const averageLatency = totalLatency / validSamples;
+    printer.latency = averageLatency;
+    document.getElementById(`latency-${index}`).textContent = `${averageLatency.toFixed(2)} ms`;
+    savePrinters();
+  } else {
+    document.getElementById(`latency-${index}`).textContent = 'Failed!';
+  }
+}
+
+
+
+function setLatency(index) {
+  const latencyValue = document.getElementById(`latency-input-${index}`).value;
+  printers[index].latency = latencyValue;
+  savePrinters();
+}
+
+
+
+
+function setupPrinterWebSocket(printer, index) {
+  const wsUrl = printer.url.replace(/^http/, 'ws'); // Replace 'http' with 'ws' to form WebSocket URL
+  const printerWs = new WebSocket(`${wsUrl}/socketjs/websocket`);
+
+  printerWs.onmessage = function(event) {
+    const message = JSON.parse(event.data);
+    // Assuming the message contains a 'data' property with the response
+    if (message.data) {
+      document.getElementById(`websocket-response-${index}`).textContent = `WebSocket Response: ${JSON.stringify(message.data)}`;
+    }
+  };
+
+  printerWs.onerror = function(event) {
+    document.getElementById(`websocket-response-${index}`).textContent = `WebSocket Error: ${event.message}`;
+  };
+
+  // Store the WebSocket connection in the printer object, if needed later
+  printer.websocket = printerWs;
+}
+
+
+
+
+window.onload = initializePrinters;
+</script>
+<style>
+body {
+  font-family: 'Arial', sans-serif;
+  background-color: #f4f4f4;
+  margin: 0;
+  padding: 10px;
+}
+
+h1, h2, h3 {
+  color: #333;
+  margin-top: 0;
+}
+
+div {
+  background-color: #fff;
+  border-radius: 5px;
+  padding: 15px;
+  margin-bottom: 15px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+input[type="text"],
+textarea {
+  width: 100%;
+  padding: 5px;
+  margin-top: 5px;
+  margin-bottom: 5px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  box-sizing: border-box;
+}
+
+button {
+  background-color: purple;
+  color: white;
+  padding: 8px 8px;
+  margin-top: 5px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.3s;
+}
+
+button:hover {
+  background-color: #005f73;
+}
+
+hr {
+  margin-top: 10px;
+  margin-bottom: 10px;
+  border: 0;
+  height: 1px;
+  background-image: linear-gradient(to right, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+}
+
+ul#printersList {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+ul#printersList li {
+  padding: 5px;
+  background-color: #e9e9e9;
+  margin-bottom: 5px;
+  border-radius: 4px;
+  min-width: 120px;
+  text-align: center;
+}
+
+label {
+  display: block;
+  margin-top: 5px;
+}
+
+@media (max-width: 768px) {
+  input[type="text"],
+  textarea,
+  button {
+    width: 100%;
+    box-sizing: border-box;
+  }
+}
+
+</style>
+</head>
+<body>
+
+<h1>OctoTwinsie Control</h1>
+
+<div>
+  <h3>Add Printer</h3>
+  <label for="name">Name:</label> <input type="text" id="name" name="name"><br>
+  <label for="url">URL:</label><input type="text" id="url" name="url" placeholder="http://octopi.local/api/"><br>
+  <label for="apiKey">API Key:</label><input type="text" id="apiKey" name="apiKey"><br>
+  <button onclick="addPrinter()">Add Printer</button>
+</div>
+
+<hr>
+
+<div>
+  <h2>Printers List</h2>
+  <ul id="printersList">
+    <!-- Printers will be listed here -->
+  </ul>
+</div>
+
+<hr>
+<h1>Control</h1>
+<div>
+  <button onclick="homeAxes()">Home All Axes on All Printers</button><br>
+
+  <label for="gcode">G-Code:</label><br>
+  <textarea id="gcode" name="gcode" rows="4" cols="50"></textarea>
+  <button onclick="sendGcode()">Send G-Code to All Printers</button>
+</div>
+
+<br>
+
+<div>
+  <button onclick="startJob()">Start Job on All Printers</button>
+  <button onclick="cancelJob()">Cancel Job on All Printers</button>
+  <button onclick="pauseJob('pause')">Pause Job on All Printers</button>
+  <button onclick="pauseJob('resume')">Resume Job on All Printers</button>
+</div>
+
+
+</body>
+</html>
