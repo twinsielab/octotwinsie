@@ -53,13 +53,14 @@ function updatePrintersList() {
   printers.forEach((printer, index) => {
     printersList.innerHTML += `<li>
       <div>
-        <b>${printer.name} - ${printer.url}</b>
-        <button onclick="removePrinter(${index})">Remove</button>
+        <h1>${printer.name}</h1>
+        ${printer.url}
       </div>
       <div>
         <img src="${printer.url}/cam_${printer.name.toLowerCase()}/?action=stream">
-        </div>
+      </div>
       <div>
+        <button onclick="removePrinter(${index})">Remove printer</button>
         Latency (ms): <input type="text" id="latency-input-${index}" value="${printer.latency}">
         <button onclick="setLatency(${index})">Set Latency</button>
         <button onclick="testLatency(${index})">Test Latency</button>
